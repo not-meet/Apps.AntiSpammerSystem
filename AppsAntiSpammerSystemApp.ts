@@ -25,14 +25,14 @@ import {
 import { AppMethod } from '@rocket.chat/apps-engine/definition/metadata';
 import { BlockBuilder } from '@rocket.chat/apps-engine/definition/uikit/blocks/BlockBuilder';
 
-import { RestrictionManager } from './actions/RestrictionManager';
-import { MessageCache } from './cache/MessageCache';
-import { AntiSpamCommand } from './commands/AntiSpamCommand';
-import { SpamProcessor } from './core/SpamProcessor';
-import { UserStatusStore } from './persistence/UserStatusStore';
-import { APP_SETTINGS, AppSetting } from './settings/Settings';
-import { ActionId } from './ui/ActionIds';
-import { buildDashboardModal, buildUserStatusBlocks } from './ui/DashboardModal';
+import { MessageCache } from './src/cache/MessageCache';
+import { AntiSpamCommand } from './src/commands/AntiSpamCommand';
+import { SpamProcessor } from './src/core/SpamProcessor';
+import { UserStatusStore } from './src/persistence/UserStatusStore';
+import { APP_SETTINGS, AppSetting } from './src/settings/Settings';
+import { ActionId } from './src/ui/ActionIds';
+import { buildDashboardModal, buildUserStatusBlocks } from './src/ui/DashboardModal';
+import { RestrictionManager } from './src/actions/RestrictionManager';
 
 export class AppsAntiSpammerSystemApp extends App
     implements IPreMessageSentPrevent, IPostMessageSent, IUIKitInteractionHandler {
@@ -40,9 +40,14 @@ export class AppsAntiSpammerSystemApp extends App
     private processor: SpamProcessor;
     private cache: MessageCache;
     private adminChannelName = 'antispam-admin';
-
     constructor(info: IAppInfo, logger: ILogger, accessors: IAppAccessors) {
         super(info, logger, accessors);
+    }
+
+    public async initialize(
+        configurationExtend: IConfigurationExtend,
+        environmentRead: IEnvironmentRead,
+    ): Promise<void> {
         this.cache = new MessageCache();
         this.processor = new SpamProcessor(
             this.cache,
@@ -50,6 +55,7 @@ export class AppsAntiSpammerSystemApp extends App
             300_000,
             3,
         );
+        await super.initialize(configurationExtend, environmentRead);
     }
 
     // ── Configuration ────────────────────────────────────────────────────
