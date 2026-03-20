@@ -1,5 +1,6 @@
 import { IPersistence, IRead } from '@rocket.chat/apps-engine/definition/accessors';
 import { IMessage } from '@rocket.chat/apps-engine/definition/messages';
+import { IUser } from '@rocket.chat/apps-engine/definition/users';
 import { MessageCache } from '../cache/MessageCache';
 import { UserStatusStore } from '../persistence/UserStatusStore';
 import { UserChaosRecord } from '../types';
@@ -26,8 +27,8 @@ export class SpamProcessor {
         this.crossChannelThreshold = crossChannelThreshold;
     }
 
-    public isNewUser(message: IMessage): boolean {
-        const createdAt = message.sender.createdAt;
+    public isNewUserFull(user: IUser): boolean {
+        const createdAt = user.createdAt;
         if (!createdAt) { return false; }
         const age = Date.now() - new Date(createdAt).getTime();
         return age < this.monitoringWindowMs;

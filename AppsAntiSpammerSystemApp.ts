@@ -156,7 +156,9 @@ export class AppsAntiSpammerSystemApp extends App
         if (!message.text || message.room.type === RoomType.DIRECT_MESSAGE) {
             return false;
         }
-        return this.processor.isNewUser(message);
+        const fullUser = await read.getUserReader().getById(message.sender.id);
+        if (!fullUser) { return false; }
+        return this.processor.isNewUserFull(fullUser);
     }
 
     public async executePreMessageSentPrevent(
@@ -181,7 +183,9 @@ export class AppsAntiSpammerSystemApp extends App
         if (!message.text || message.room.type === RoomType.DIRECT_MESSAGE) {
             return false;
         }
-        return this.processor.isNewUser(message);
+        const fullUser = await read.getUserReader().getById(message.sender.id);
+        if (!fullUser) { return false; }
+        return this.processor.isNewUserFull(fullUser);
     }
 
     public async executePostMessageSent(
