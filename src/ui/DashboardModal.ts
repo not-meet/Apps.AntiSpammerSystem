@@ -7,6 +7,17 @@ import { UserStatusStore } from '../persistence/UserStatusStore';
 import { CHAOS_LABELS, ChaosLevel, UserChaosRecord } from '../types';
 import { ActionId, ModalId } from './ActionIds';
 
+function formatDuration(ms: number): string {
+    const totalSec = Math.ceil(ms / 1000);
+    if (totalSec < 60) { return `${totalSec}s`; }
+    const min = Math.floor(totalSec / 60);
+    const sec = totalSec % 60;
+    if (min < 60) { return sec > 0 ? `${min}m ${sec}s` : `${min}m`; }
+    const hr = Math.floor(min / 60);
+    const remMin = min % 60;
+    return remMin > 0 ? `${hr}h ${remMin}m` : `${hr}h`;
+}
+
 export async function buildDashboardModal(read: IRead, appId: string): Promise<IUIKitSurface> {
     const blocks = new BlockBuilder(appId);
     const allRecords = await UserStatusStore.getAll(read);
@@ -26,9 +37,11 @@ export async function buildDashboardModal(read: IRead, appId: string): Promise<I
 
     for (const rec of flagged) {
         const label = CHAOS_LABELS[rec.chaosLevel] || 'Unknown';
-        const cooldown = rec.cooldownUntil > Date.now()
-            ? `⏳ ${Math.ceil((rec.cooldownUntil - Date.now()) / 1000)}s remaining`
-            : '—';
+        const cooldown = rec.chaosLevel === ChaosLevel.AdminReview
+            ? '🔒 Blocked (pending review)'
+            : rec.cooldownUntil > Date.now()
+                ? `⏳ ${formatDuration(rec.cooldownUntil - Date.now())} remaining`
+                : '—';
 
         blocks.addSectionBlock({
             text: blocks.newMarkdownTextObject(
@@ -42,6 +55,17 @@ export async function buildDashboardModal(read: IRead, appId: string): Promise<I
                 actionId: ActionId.VOUCH_USER,
             }),
         });
+        if (rec.cooldownUntil > Date.now()) {
+            blocks.addActionsBlock({
+                elements: [
+                    blocks.newButtonElement({
+                        text: blocks.newPlainTextObject('🔄 Reset Cooldown'),
+                        value: rec.userId,
+                        actionId: ActionId.RESET_COOLDOWN,
+                    }),
+                ],
+            });
+        }
         blocks.addDividerBlock();
     }
 
@@ -64,9 +88,11 @@ export function buildUserStatusBlocks(
     rec: UserChaosRecord,
 ): void {
     const label = CHAOS_LABELS[rec.chaosLevel] || 'Unknown';
-    const cooldown = rec.cooldownUntil > Date.now()
-        ? `⏳ Expires in ${Math.ceil((rec.cooldownUntil - Date.now()) / 1000)}s`
-        : 'None';
+    const cooldown = rec.chaosLevel === ChaosLevel.AdminReview
+        ? '🔒 Blocked (pending review)'
+        : rec.cooldownUntil > Date.now()
+            ? `⏳ Expires in ${formatDuration(rec.cooldownUntil - Date.now())}`
+            : 'None';
 
     blocks.addSectionBlock({
         text: blocks.newMarkdownTextObject(`📊 **Status for @${rec.username}**`),

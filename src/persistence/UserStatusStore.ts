@@ -3,7 +3,7 @@ import {
     RocketChatAssociationModel,
     RocketChatAssociationRecord,
 } from '@rocket.chat/apps-engine/definition/metadata';
-import { ChaosLevel, COOLDOWN_DURATIONS, UserChaosRecord } from '../types';
+import { ChaosLevel, COOLDOWN_DURATIONS, ESCALATION_THRESHOLDS, UserChaosRecord } from '../types';
 
 const ASSOC_SCOPE = 'antispam-chaos';
 
@@ -59,21 +59,41 @@ export class UserStatusStore {
             cooldownUntil: 0,
             lastEscalation: 0,
             totalFlags: 0,
+            flagsAtLevel: 0,
         };
 
-        const newLevel = Math.min(current.chaosLevel + 1, ChaosLevel.AdminReview) as ChaosLevel;
-        const duration = COOLDOWN_DURATIONS[newLevel];
         const now = Date.now();
+        const newFlagsAtLevel = (current.flagsAtLevel || 0) + 1;
+        const threshold = ESCALATION_THRESHOLDS[current.chaosLevel];
+        const shouldEscalate = newFlagsAtLevel >= threshold
+            && current.chaosLevel < ChaosLevel.AdminReview;
+
+        if (shouldEscalate) {
+            const newLevel = (current.chaosLevel + 1) as ChaosLevel;
+            const duration = COOLDOWN_DURATIONS[newLevel];
+
+            const updated: UserChaosRecord = {
+                userId,
+                username,
+                chaosLevel: newLevel,
+                cooldownUntil: duration > 0 ? now + duration : 0,
+                lastEscalation: now,
+                totalFlags: current.totalFlags + 1,
+                flagsAtLevel: 0,
+            };
+            await UserStatusStore.save(persistence, userId, updated);
+            return updated;
+        }
 
         const updated: UserChaosRecord = {
             userId,
             username,
-            chaosLevel: newLevel,
-            cooldownUntil: duration > 0 ? now + duration : 0,
+            chaosLevel: current.chaosLevel,
+            cooldownUntil: current.cooldownUntil,
             lastEscalation: now,
             totalFlags: current.totalFlags + 1,
+            flagsAtLevel: newFlagsAtLevel,
         };
-
         await UserStatusStore.save(persistence, userId, updated);
         return updated;
     }
@@ -91,7 +111,22 @@ export class UserStatusStore {
             cooldownUntil: 0,
             lastEscalation: 0,
             totalFlags: 0,
+            flagsAtLevel: 0,
             vouchedBy: adminUsername,
+        });
+    }
+
+    public static async resetCooldown(
+        read: IRead,
+        persistence: IPersistence,
+        userId: string,
+    ): Promise<void> {
+        const existing = await UserStatusStore.get(read, userId);
+        if (!existing) { return; }
+
+        await UserStatusStore.save(persistence, userId, {
+            ...existing,
+            cooldownUntil: 0,
         });
     }
 

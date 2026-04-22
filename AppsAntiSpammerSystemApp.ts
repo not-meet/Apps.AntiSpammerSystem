@@ -27,12 +27,16 @@ import { BlockBuilder } from '@rocket.chat/apps-engine/definition/uikit/blocks/B
 
 import { MessageCache } from './src/cache/MessageCache';
 import { AntiSpamCommand } from './src/commands/AntiSpamCommand';
+import { AiConfig } from './src/core/AiService';
+import { ScheduledReporter } from './src/core/ScheduledReporter';
 import { SpamProcessor } from './src/core/SpamProcessor';
+import { FlagLogStore } from './src/persistence/FlagLogStore';
 import { UserStatusStore } from './src/persistence/UserStatusStore';
 import { APP_SETTINGS, AppSetting } from './src/settings/Settings';
 import { ActionId } from './src/ui/ActionIds';
 import { buildDashboardModal, buildUserStatusBlocks } from './src/ui/DashboardModal';
 import { RestrictionManager } from './src/actions/RestrictionManager';
+import { ChaosLevel, FlagAction } from './src/types';
 
 export class AppsAntiSpammerSystemApp extends App
     implements IPreMessageSentPrevent, IPostMessageSent, IUIKitInteractionHandler {
@@ -40,6 +44,12 @@ export class AppsAntiSpammerSystemApp extends App
     private processor: SpamProcessor;
     private cache: MessageCache;
     private adminChannelName = 'antispam-admin';
+    private scheduledReportEnabled = false;
+    private scheduledReportTime = '18:00';
+    private aiConfig: AiConfig = { provider: 'none', apiKey: '', model: '' };
+    private lastReportDate = '';
+    private lastCacheCleanup = 0;
+
     constructor(info: IAppInfo, logger: ILogger, accessors: IAppAccessors) {
         super(info, logger, accessors);
     }
@@ -69,7 +79,7 @@ export class AppsAntiSpammerSystemApp extends App
         }
 
         await configuration.slashCommands.provideSlashCommand(
-            new AntiSpamCommand(this.cache, this.getID()),
+            new AntiSpamCommand(this.cache, this.getID(), () => this.aiConfig),
         );
 
         configuration.ui.registerButton({
@@ -105,12 +115,47 @@ export class AppsAntiSpammerSystemApp extends App
         const slidingSec = await settings.getValueById(AppSetting.SlidingWindowSeconds) as number;
         const threshold = await settings.getValueById(AppSetting.CrossChannelThreshold) as number;
         this.adminChannelName = await settings.getValueById(AppSetting.AdminChannelName) as string;
+        this.scheduledReportEnabled = await settings.getValueById(AppSetting.ScheduledReportEnabled) as boolean;
+        this.scheduledReportTime = await settings.getValueById(AppSetting.ScheduledReportTime) as string || '18:00';
+
+        const aiProvider = await settings.getValueById(AppSetting.AiProvider) as string;
+        const aiApiKey = await settings.getValueById(AppSetting.AiApiKey) as string;
+        const aiModel = await settings.getValueById(AppSetting.AiModel) as string;
+        this.aiConfig = {
+            provider: (aiProvider || 'none') as AiConfig['provider'],
+            apiKey: aiApiKey || '',
+            model: aiModel || '',
+        };
 
         this.processor.updateConfig(
             windowDays * 86_400_000,
             slidingSec * 1000,
             threshold,
         );
+    }
+
+    // ── Scheduled Report (piggybacks on message processing) ────────────
+
+    private async tryScheduledReport(
+        read: IRead,
+        modify: IModify,
+        http: IHttp,
+    ): Promise<void> {
+        if (!this.scheduledReportEnabled) { return; }
+        if (!ScheduledReporter.shouldSendReport(this.scheduledReportTime)) { return; }
+
+        const todayKey = new Date().toISOString().slice(0, 10);
+        if (this.lastReportDate === todayKey) { return; }
+        this.lastReportDate = todayKey;
+
+        try {
+            await ScheduledReporter.sendDailyReport(
+                read, modify, http,
+                this.adminChannelName, this.aiConfig,
+            );
+        } catch (err) {
+            this.getLogger().error('Scheduled report failed:', err);
+        }
     }
 
     // ── Install: Create admin channel ────────────────────────────────────
@@ -173,7 +218,7 @@ export class AppsAntiSpammerSystemApp extends App
         return restricted;
     }
 
-    // ── Post-send: Analyze + escalate + notify ───────────────────────────
+    // ── Post-send: Analyze + escalate + notify + log ─────────────────────
 
     public async checkPostMessageSent(
         message: IMessage,
@@ -195,13 +240,49 @@ export class AppsAntiSpammerSystemApp extends App
         persistence: IPersistence,
         modify: IModify,
     ): Promise<void> {
+        await this.tryScheduledReport(read, modify, http);
+
+        const now = Date.now();
+        if (now - this.lastCacheCleanup > 300_000) {
+            this.cache.clearStale(600_000);
+            this.lastCacheCleanup = now;
+        }
+
         const result = await this.processor.analyzeMessage(message, read, persistence);
 
-        if (result.escalated && result.record) {
-            await RestrictionManager.applyAction(
-                read, modify, message.sender,
-                result.record, result.trigger, this.adminChannelName, this.getID(),
-            );
+        if (result.flagged && result.record) {
+            const chaosToAction: Record<number, FlagAction> = {
+                [ChaosLevel.Clean]: 'warning',
+                [ChaosLevel.Warning]: 'warning',
+                [ChaosLevel.Cooldown]: 'cooldown',
+                [ChaosLevel.Restricted]: 'restricted',
+                [ChaosLevel.AdminReview]: 'admin-review',
+            };
+
+            let roomName = 'unknown';
+            try {
+                const room = await read.getRoomReader().getById(message.room.id);
+                roomName = room?.slugifiedName || room?.displayName || message.room.id;
+            } catch { /* fallback */ }
+
+            await FlagLogStore.log(persistence, read, {
+                userId: message.sender.id,
+                username: message.sender.username,
+                roomId: message.room.id,
+                roomName,
+                messageText: (message.text || '').substring(0, 200),
+                trigger: result.trigger as any,
+                chaosLevel: result.record.chaosLevel,
+                timestamp: Date.now(),
+                action: chaosToAction[result.record.chaosLevel] || 'warning',
+            });
+
+            if (result.levelChanged) {
+                await RestrictionManager.applyAction(
+                    read, modify, message.sender,
+                    result.record, result.trigger, this.adminChannelName, this.getID(),
+                );
+            }
         }
     }
 
@@ -222,6 +303,16 @@ export class AppsAntiSpammerSystemApp extends App
             if (targetUser) {
                 await UserStatusStore.reset(persistence, targetUser.id, targetUser.username, user.username);
                 this.cache.clearUser(targetUser.id);
+
+                const updatedModal = await buildDashboardModal(read, this.getID());
+                return context.getInteractionResponder().updateModalViewResponse(updatedModal);
+            }
+        }
+
+        if (actionId === ActionId.RESET_COOLDOWN && value) {
+            const targetUser = await read.getUserReader().getById(value);
+            if (targetUser) {
+                await UserStatusStore.resetCooldown(read, persistence, targetUser.id);
 
                 const updatedModal = await buildDashboardModal(read, this.getID());
                 return context.getInteractionResponder().updateModalViewResponse(updatedModal);
