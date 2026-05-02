@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { IPersistence, IRead } from '@rocket.chat/apps-engine/definition/accessors';
 import { IMessage } from '@rocket.chat/apps-engine/definition/messages';
 import { IUser } from '@rocket.chat/apps-engine/definition/users';
@@ -16,16 +17,22 @@ export class SpamProcessor {
     private monitoringWindowMs: number;
     private slidingWindowMs: number;
     private crossChannelThreshold: number;
+    private rateShortBurst: number;
+    private rateSustained: number;
 
     constructor(
         private readonly cache: MessageCache,
         monitoringWindowMs: number,
         slidingWindowMs: number,
         crossChannelThreshold: number,
+        rateShortBurst: number = 5,
+        rateSustained: number = 12,
     ) {
         this.monitoringWindowMs = monitoringWindowMs;
         this.slidingWindowMs = slidingWindowMs;
         this.crossChannelThreshold = crossChannelThreshold;
+        this.rateShortBurst = rateShortBurst;
+        this.rateSustained = rateSustained;
     }
 
     public isNewUserFull(user: IUser): boolean {
@@ -45,9 +52,17 @@ export class SpamProcessor {
         const userId = message.sender.id;
         const roomId = message.room.id;
         const username = message.sender.username;
+        const messageId = message.id;
         const { hasUrl, domains } = this.extractUrlInfo(text);
 
         this.cache.trackMessage(userId);
+
+        // Edit-awareness: if this messageId already exists in cache, it's an edit — update, don't escalate
+        if (messageId && this.cache.isEditedMessage(userId, messageId)) {
+            const normalizedHash = this.hashText(normalized);
+            this.cache.add(userId, normalizedHash, roomId, normalized, hasUrl, domains, messageId);
+            return { flagged: false, levelChanged: false, trigger: 'edit', record: null };
+        }
 
         const existing = await UserStatusStore.get(read, userId);
         const prevLevel = existing?.chaosLevel ?? 0;
@@ -56,7 +71,7 @@ export class SpamProcessor {
         const normalizedHash = this.hashText(normalized);
         if (this.cache.hasExactDuplicate(userId, normalizedHash, this.slidingWindowMs)) {
             const record = await UserStatusStore.escalate(read, persistence, userId, username);
-            this.cache.add(userId, normalizedHash, roomId, normalized, hasUrl, domains);
+            this.cache.add(userId, normalizedHash, roomId, normalized, hasUrl, domains, messageId);
             return { flagged: true, levelChanged: record.chaosLevel > prevLevel, trigger: 'duplicate', record };
         }
 
@@ -74,7 +89,7 @@ export class SpamProcessor {
             );
             if (fuzzyChannels >= this.crossChannelThreshold) {
                 const record = await UserStatusStore.escalate(read, persistence, userId, username);
-                this.cache.add(userId, normalizedHash, roomId, normalized, hasUrl, domains);
+                this.cache.add(userId, normalizedHash, roomId, normalized, hasUrl, domains, messageId);
                 return { flagged: true, levelChanged: record.chaosLevel > prevLevel, trigger: 'polymorphic-spam', record };
             }
         }
@@ -83,16 +98,16 @@ export class SpamProcessor {
         const channels = this.cache.crossChannelCount(userId, normalizedHash, roomId, this.slidingWindowMs);
         if (channels >= this.crossChannelThreshold) {
             const record = await UserStatusStore.escalate(read, persistence, userId, username);
-            this.cache.add(userId, normalizedHash, roomId, normalized, hasUrl, domains);
+            this.cache.add(userId, normalizedHash, roomId, normalized, hasUrl, domains, messageId);
             return { flagged: true, levelChanged: record.chaosLevel > prevLevel, trigger: 'cross-channel', record };
         }
 
-        // Gate 5: Message rate flood (≥5 msgs in 30s or ≥12 in 2 min)
+        // Gate 5: Message rate flood (configurable thresholds)
         const rate30s = this.cache.getMessageRate(userId, 30_000);
         const rate2m = this.cache.getMessageRate(userId, 120_000);
-        if (rate30s >= 5 || rate2m >= 12) {
+        if (rate30s >= this.rateShortBurst || rate2m >= this.rateSustained) {
             const record = await UserStatusStore.escalate(read, persistence, userId, username);
-            this.cache.add(userId, normalizedHash, roomId, normalized, hasUrl, domains);
+            this.cache.add(userId, normalizedHash, roomId, normalized, hasUrl, domains, messageId);
             return { flagged: true, levelChanged: record.chaosLevel > prevLevel, trigger: 'rate-flood', record };
         }
 
@@ -100,7 +115,7 @@ export class SpamProcessor {
         const roomSpread = this.cache.getDistinctRooms(userId, 120_000);
         if (roomSpread >= this.crossChannelThreshold && rate2m >= this.crossChannelThreshold) {
             const record = await UserStatusStore.escalate(read, persistence, userId, username);
-            this.cache.add(userId, normalizedHash, roomId, normalized, hasUrl, domains);
+            this.cache.add(userId, normalizedHash, roomId, normalized, hasUrl, domains, messageId);
             return { flagged: true, levelChanged: record.chaosLevel > prevLevel, trigger: 'room-spread', record };
         }
 
@@ -109,13 +124,13 @@ export class SpamProcessor {
             const urlCount = this.cache.getUrlMessageCount(userId, 120_000);
             if (urlCount >= 3 && roomSpread >= 2) {
                 const record = await UserStatusStore.escalate(read, persistence, userId, username);
-                this.cache.add(userId, normalizedHash, roomId, normalized, hasUrl, domains);
+                this.cache.add(userId, normalizedHash, roomId, normalized, hasUrl, domains, messageId);
                 return { flagged: true, levelChanged: record.chaosLevel > prevLevel, trigger: 'url-spam', record };
             }
         }
 
         // Clean — update cache
-        this.cache.add(userId, normalizedHash, roomId, normalized, hasUrl, domains);
+        this.cache.add(userId, normalizedHash, roomId, normalized, hasUrl, domains, messageId);
         return { flagged: false, levelChanged: false, trigger: 'none', record: null };
     }
 
@@ -123,10 +138,14 @@ export class SpamProcessor {
         monitoringWindowMs: number,
         slidingWindowMs: number,
         crossChannelThreshold: number,
+        rateShortBurst: number,
+        rateSustained: number,
     ): void {
         this.monitoringWindowMs = monitoringWindowMs;
         this.slidingWindowMs = slidingWindowMs;
         this.crossChannelThreshold = crossChannelThreshold;
+        this.rateShortBurst = rateShortBurst;
+        this.rateSustained = rateSustained;
     }
 
     /**
@@ -186,13 +205,8 @@ export class SpamProcessor {
         return { hasUrl: domains.length > 0, domains };
     }
 
-    private hashText(text: string): number {
+    private hashText(text: string): string {
         const normalized = text.toLowerCase().trim().replace(/\s+/g, ' ');
-        let h = 5381;
-        for (let i = 0; i < normalized.length; i++) {
-            h = ((h << 5) + h) + normalized.charCodeAt(i);
-            h = h & h;
-        }
-        return h;
+        return createHash('sha256').update(normalized).digest('hex');
     }
 }

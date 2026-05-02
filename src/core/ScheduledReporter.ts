@@ -113,9 +113,30 @@ export class ScheduledReporter {
         await modify.getCreator().finish(msg);
     }
 
-    public static shouldSendReport(reportTime: string): boolean {
+    public static shouldSendReport(reportTime: string, timezone: string = 'UTC'): boolean {
         const [targetHour, targetMinute] = reportTime.split(':').map(Number);
+        if (isNaN(targetHour) || isNaN(targetMinute)) { return false; }
+
         const now = new Date();
-        return now.getHours() === targetHour && now.getMinutes() === targetMinute;
+        let currentHour: number;
+        let currentMinute: number;
+
+        try {
+            const parts = new Intl.DateTimeFormat('en-US', {
+                hour: 'numeric',
+                minute: 'numeric',
+                hour12: false,
+                timeZone: timezone,
+            }).formatToParts(now);
+
+            currentHour = Number(parts.find((p) => p.type === 'hour')?.value ?? -1);
+            currentMinute = Number(parts.find((p) => p.type === 'minute')?.value ?? -1);
+        } catch {
+            // Fallback to UTC if timezone is invalid
+            currentHour = now.getUTCHours();
+            currentMinute = now.getUTCMinutes();
+        }
+
+        return currentHour === targetHour && currentMinute === targetMinute;
     }
 }

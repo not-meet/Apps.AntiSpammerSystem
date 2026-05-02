@@ -18,7 +18,8 @@ export interface UserChaosRecord {
 }
 
 export interface CachedMessage {
-    hash: number;
+    hash: string;
+    messageId?: string;
     roomId: string;
     timestamp: number;
     normalized: string;

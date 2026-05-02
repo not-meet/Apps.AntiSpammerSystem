@@ -1,5 +1,6 @@
 export interface CachedMessage {
-    hash: number;
+    hash: string;
+    messageId?: string;
     roomId: string;
     timestamp: number;
     normalized: string;
@@ -10,23 +11,47 @@ export interface CachedMessage {
 export class MessageCache {
     private cache: Map<string, CachedMessage[]> = new Map();
     private readonly maxPerUser = 30;
+    private readonly maxTotalUsers = 500;
     private rateTracker: Map<string, number[]> = new Map();
     private readonly maxRateEntries = 60;
 
-    public add(userId: string, hash: number, roomId: string, normalized: string, hasUrl: boolean, domains: string[]): void {
+    public add(userId: string, hash: string, roomId: string, normalized: string, hasUrl: boolean, domains: string[], messageId?: string): void {
+        // Edit-awareness: if messageId already exists, update in place
+        if (messageId) {
+            const entries = this.cache.get(userId);
+            if (entries) {
+                const idx = entries.findIndex((e) => e.messageId === messageId);
+                if (idx !== -1) {
+                    entries[idx] = { hash, messageId, roomId, timestamp: Date.now(), normalized, hasUrl, domains };
+                    return;
+                }
+            }
+        }
+
         const entries = this.cache.get(userId) || [];
-        entries.push({ hash, roomId, timestamp: Date.now(), normalized, hasUrl, domains });
+        entries.push({ hash, messageId, roomId, timestamp: Date.now(), normalized, hasUrl, domains });
         if (entries.length > this.maxPerUser) {
             entries.shift();
         }
         this.cache.set(userId, entries);
+
+        // Evict LRU users if total user count exceeds cap
+        if (this.cache.size > this.maxTotalUsers) {
+            this.evictLruUser();
+        }
     }
 
-    public hasExactDuplicate(userId: string, hash: number, windowMs: number): boolean {
+    public isEditedMessage(userId: string, messageId: string): boolean {
+        const entries = this.cache.get(userId);
+        if (!entries) { return false; }
+        return entries.some((e) => e.messageId === messageId);
+    }
+
+    public hasExactDuplicate(userId: string, hash: string, windowMs: number): boolean {
         return this.getRecent(userId, windowMs).some((e) => e.hash === hash);
     }
 
-    public crossChannelCount(userId: string, hash: number, currentRoomId: string, windowMs: number): number {
+    public crossChannelCount(userId: string, hash: string, currentRoomId: string, windowMs: number): number {
         const rooms = new Set<string>();
         for (const entry of this.getRecent(userId, windowMs)) {
             if (entry.hash === hash) {
@@ -121,6 +146,22 @@ export class MessageCache {
     public clearUser(userId: string): void {
         this.cache.delete(userId);
         this.rateTracker.delete(userId);
+    }
+
+    private evictLruUser(): void {
+        let oldestUser = '';
+        let oldestTime = Infinity;
+        for (const [userId, entries] of this.cache) {
+            const latest = entries.length > 0 ? entries[entries.length - 1].timestamp : 0;
+            if (latest < oldestTime) {
+                oldestTime = latest;
+                oldestUser = userId;
+            }
+        }
+        if (oldestUser) {
+            this.cache.delete(oldestUser);
+            this.rateTracker.delete(oldestUser);
+        }
     }
 
     private getRecent(userId: string, windowMs: number): CachedMessage[] {

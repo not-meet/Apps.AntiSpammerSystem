@@ -46,6 +46,7 @@ export class AppsAntiSpammerSystemApp extends App
     private adminChannelName = 'antispam-admin';
     private scheduledReportEnabled = false;
     private scheduledReportTime = '18:00';
+    private scheduledReportTimezone = 'UTC';
     private aiConfig: AiConfig = { provider: 'none', apiKey: '', model: '' };
     private lastReportDate = '';
     private lastCacheCleanup = 0;
@@ -117,6 +118,10 @@ export class AppsAntiSpammerSystemApp extends App
         this.adminChannelName = await settings.getValueById(AppSetting.AdminChannelName) as string;
         this.scheduledReportEnabled = await settings.getValueById(AppSetting.ScheduledReportEnabled) as boolean;
         this.scheduledReportTime = await settings.getValueById(AppSetting.ScheduledReportTime) as string || '18:00';
+        this.scheduledReportTimezone = await settings.getValueById(AppSetting.ScheduledReportTimezone) as string || 'UTC';
+
+        const rateShortBurst = await settings.getValueById(AppSetting.RateShortBurst) as number;
+        const rateSustained = await settings.getValueById(AppSetting.RateSustained) as number;
 
         const aiProvider = await settings.getValueById(AppSetting.AiProvider) as string;
         const aiApiKey = await settings.getValueById(AppSetting.AiApiKey) as string;
@@ -131,6 +136,8 @@ export class AppsAntiSpammerSystemApp extends App
             windowDays * 86_400_000,
             slidingSec * 1000,
             threshold,
+            rateShortBurst || 5,
+            rateSustained || 12,
         );
     }
 
@@ -142,7 +149,7 @@ export class AppsAntiSpammerSystemApp extends App
         http: IHttp,
     ): Promise<void> {
         if (!this.scheduledReportEnabled) { return; }
-        if (!ScheduledReporter.shouldSendReport(this.scheduledReportTime)) { return; }
+        if (!ScheduledReporter.shouldSendReport(this.scheduledReportTime, this.scheduledReportTimezone)) { return; }
 
         const todayKey = new Date().toISOString().slice(0, 10);
         if (this.lastReportDate === todayKey) { return; }
@@ -201,9 +208,10 @@ export class AppsAntiSpammerSystemApp extends App
         if (!message.text || message.room.type === RoomType.DIRECT_MESSAGE) {
             return false;
         }
-        const fullUser = await read.getUserReader().getById(message.sender.id);
-        if (!fullUser) { return false; }
-        return this.processor.isNewUserFull(fullUser);
+        // const fullUser = await read.getUserReader().getById(message.sender.id);
+        // if (!fullUser) { return false; }
+        // return this.processor.isNewUserFull(fullUser);
+        return true;
     }
 
     public async executePreMessageSentPrevent(
@@ -228,9 +236,10 @@ export class AppsAntiSpammerSystemApp extends App
         if (!message.text || message.room.type === RoomType.DIRECT_MESSAGE) {
             return false;
         }
-        const fullUser = await read.getUserReader().getById(message.sender.id);
-        if (!fullUser) { return false; }
-        return this.processor.isNewUserFull(fullUser);
+        // const fullUser = await read.getUserReader().getById(message.sender.id);
+        // if (!fullUser) { return false; }
+        // return this.processor.isNewUserFull(fullUser);
+        return true;
     }
 
     public async executePostMessageSent(
